@@ -22,6 +22,8 @@ import android.widget.Toast;
  */
 final class ToastImpl {
 
+    private static final String WINDOW_TITLE = "Toast";
+
     private static final Handler HANDLER = new Handler(Looper.getMainLooper());
 
     /** 当前的吐司对象 */
@@ -42,7 +44,7 @@ final class ToastImpl {
     ToastImpl(Activity activity, CustomToast toast) {
         this((Context) activity, toast);
         mGlobalShow = false;
-        mWindowLifecycle = new WindowLifecycle((activity));
+        mWindowLifecycle = new WindowLifecycle(activity);
     }
 
     ToastImpl(Application application, CustomToast toast) {
@@ -105,19 +107,26 @@ final class ToastImpl {
     /**
      * 发送无障碍事件
      */
-    private void trySendAccessibilityEvent(View view) {
+    @SuppressWarnings("deprecation")
+    private void sendAccessibilityEvent(View view) {
         final Context context = view.getContext();
         AccessibilityManager accessibilityManager =
                 (AccessibilityManager) context.getSystemService(Context.ACCESSIBILITY_SERVICE);
         if (!accessibilityManager.isEnabled()) {
             return;
         }
-        // 将 Toast 视为通知，因为它们用于向用户宣布短暂的信息
-        AccessibilityEvent event = AccessibilityEvent.obtain(
-                AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED);
+        int eventType = AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED;
+        AccessibilityEvent event;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            event = new AccessibilityEvent();
+            event.setEventType(eventType);
+        } else {
+            event = AccessibilityEvent.obtain(eventType);
+        }
         event.setClassName(Toast.class.getName());
         event.setPackageName(context.getPackageName());
         view.dispatchPopulateAccessibilityEvent(event);
+        // 将 Toast 视为通知，因为它们用于向用户宣布短暂的信息
         accessibilityManager.sendAccessibilityEvent(event);
     }
 
@@ -146,6 +155,16 @@ final class ToastImpl {
             params.verticalMargin = mToast.getVerticalMargin();
             params.horizontalMargin = mToast.getHorizontalMargin();
             params.windowAnimations = mToast.getAnimationsId();
+            params.setTitle(WINDOW_TITLE);
+
+            // 指定 WindowManager 忽略系统窗口可见性的影响
+            // 例如下面这些的显示和隐藏都会影响当前 WindowManager 的显示（触发位置调整）
+            // WindowInsets.Type.statusBars()：状态栏
+            // WindowInsets.Type.navigationBars()：导航栏
+            // WindowInsets.Type.ime()：输入法（软键盘）
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                params.setFitInsetsIgnoringVisibility(true);
+            }
 
             // 如果是全局显示
             if (mGlobalShow) {
@@ -162,7 +181,6 @@ final class ToastImpl {
             }
 
             try {
-
                 windowManager.addView(mToast.getView(), params);
                 // 添加一个移除吐司的任务
                 HANDLER.postDelayed(() -> cancel(), mToast.getDuration() == Toast.LENGTH_LONG ?
@@ -172,12 +190,14 @@ final class ToastImpl {
                 // 当前已经显示
                 setShow(true);
                 // 发送无障碍事件
-                trySendAccessibilityEvent(mToast.getView());
-            } catch (IllegalStateException | WindowManager.BadTokenException e) {
-                // 如果这个 View 对象被重复添加到 WindowManager 则会抛出异常
+                sendAccessibilityEvent(mToast.getView());
+            } catch (Exception e) {
+                // 1. 如果这个 View 对象被重复添加到 WindowManager 则会抛出异常
                 // java.lang.IllegalStateException: View android.widget.TextView has already been added to the window manager.
-                // 如果 WindowManager 绑定的 Activity 已经销毁，则会抛出异常
+                // 2. 如果 WindowManager 绑定的 Activity 已经销毁，则会抛出异常
                 // android.view.WindowManager$BadTokenException: Unable to add window -- token android.os.BinderProxy@ef1ccb6 is not valid; is your activity running?
+                /// 3. 厂商的问题也会导致异常的出现，Github issue 地址：https://github.com/getActivity/Toaster/issues/149
+                // java.lang.RuntimeException: InputChannel is not initialized.
                 e.printStackTrace();
             }
         }
@@ -196,8 +216,8 @@ final class ToastImpl {
 
                 windowManager.removeViewImmediate(mToast.getView());
 
-            } catch (IllegalArgumentException e) {
-                // 如果当前 WindowManager 没有附加这个 View 则会抛出异常
+            } catch (Exception e) {
+                // 如果当前 WindowManager 没有添加这个 View 则会抛出异常
                 // java.lang.IllegalArgumentException: View=android.widget.TextView not attached to window manager
                 e.printStackTrace();
             } finally {

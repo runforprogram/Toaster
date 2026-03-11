@@ -1,21 +1,13 @@
 apply plugin: 'com.android.application'
+apply from : '../common.gradle'
 
 android {
-    compileSdkVersion 33
+    namespace 'com.hjq.toast.demo'
 
     defaultConfig {
         applicationId "com.hjq.toast.demo"
-        minSdkVersion 16
-        targetSdkVersion 33
-        versionCode 1205
-        versionName "12.5"
+        minSdk 17
         testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
-    }
-
-    // 使用 JDK 1.8
-    compileOptions {
-        targetCompatibility JavaVersion.VERSION_1_8
-        sourceCompatibility JavaVersion.VERSION_1_8
     }
 
     // Apk 签名的那些事：https://www.jianshu.com/p/a1f8e5896aa2
@@ -42,9 +34,9 @@ android {
         }
     }
 
-    applicationVariants.all { variant ->
+    applicationVariants.configureEach { variant ->
         // apk 输出文件名配置
-        variant.outputs.all { output ->
+        variant.outputs.configureEach { output ->
             outputFileName = rootProject.getName() + '.apk'
         }
     }
@@ -62,13 +54,13 @@ dependencies {
     implementation 'com.google.android.material:material:1.4.0'
 
     // 标题栏框架：https://github.com/getActivity/TitleBar
-    implementation 'com.github.getActivity:TitleBar:10.5'
+    implementation 'com.github.getActivity:TitleBar:10.6'
 
     // 权限请求框架：https://github.com/getActivity/XXPermissions
-    implementation 'com.github.getActivity:XXPermissions:18.3'
+    implementation 'com.github.getActivity:XXPermissions:26.5'
 
     // 悬浮窗框架：https://github.com/getActivity/EasyWindow
-    implementation 'com.github.getActivity:EasyWindow:10.3'
+    implementation 'com.github.getActivity:EasyWindow:13.0'
 
     // 内存泄漏捕捉：https://github.com/square/leakcanary
     debugImplementation 'com.squareup.leakcanary:leakcanary-android:2.12'

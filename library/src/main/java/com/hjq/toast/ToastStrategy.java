@@ -47,16 +47,7 @@ public class ToastStrategy implements IToastStrategy {
     public static final int SHOW_STRATEGY_TYPE_QUEUE = 1;
 
     /** Handler 对象 */
-    private final static Handler HANDLER = new Handler(Looper.getMainLooper());
-
-    /**
-     * 默认延迟时间
-     *
-     * 延迟一段时间之后再执行，因为在没有通知栏权限的情况下，Toast 只能显示在当前 Activity 上面
-     * 如果当前 Activity 在 showToast 之后立马进行 finish 了，那么这个时候 Toast 可能会显示不出来
-     * 因为 Toast 会显示在销毁 Activity 界面上，而不会显示在新跳转的 Activity 上面
-     */
-    private static final int DEFAULT_DELAY_TIMEOUT = 200;
+    private static final Handler HANDLER = new Handler(Looper.getMainLooper());
 
     /** 应用上下文 */
     private Application mApplication;
@@ -66,11 +57,6 @@ public class ToastStrategy implements IToastStrategy {
 
     /** 吐司显示策略 */
     private final int mShowStrategyType;
-
-    /** 显示消息 Token */
-    private final Object mShowMessageToken = new Object();
-    /** 取消消息 Token */
-    private final Object mCancelMessageToken = new Object();
 
     /** 上一个 Toast 显示的时间 */
     private volatile long mLastShowToastMillis;
@@ -93,25 +79,33 @@ public class ToastStrategy implements IToastStrategy {
     @Override
     public void registerStrategy(Application application) {
         mApplication = application;
-        ActivityStack.getInstance().register(application);
+    }
+
+    @Override
+    public int computeShowDuration(CharSequence text) {
+        return text.length() > 20 ? Toast.LENGTH_LONG : Toast.LENGTH_SHORT;
     }
 
     @Override
     public IToast createToast(ToastParams params) {
-        Activity foregroundActivity = ActivityStack.getInstance().getForegroundActivity();
+        Activity toastActivity = getToastActivity();
         IToast toast;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
-                Settings.canDrawOverlays(mApplication)) {
+        if ((params.priorityType == ToastParams.PRIORITY_TYPE_DEFAULT ||
+            params.priorityType == ToastParams.PRIORITY_TYPE_GLOBAL) &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            Settings.canDrawOverlays(mApplication)) {
             // 如果有悬浮窗权限，就开启全局的 Toast
             toast = new GlobalToast(mApplication);
-        } else if (foregroundActivity != null && !params.crossPageShow) {
+        } else if (toastActivity != null &&
+            (params.priorityType == ToastParams.PRIORITY_TYPE_DEFAULT ||
+                params.priorityType == ToastParams.PRIORITY_TYPE_LOCAL)) {
             // 如果没有悬浮窗权限，就开启一个依附于 Activity 的 Toast
-            toast = new ActivityToast(foregroundActivity);
+            toast = new ActivityToast(toastActivity);
         } else if (Build.VERSION.SDK_INT == Build.VERSION_CODES.N_MR1) {
             // 处理 Android 7.1 上 Toast 在主线程被阻塞后会导致报错的问题
             toast = new SafeToast(mApplication);
         } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
-                !areNotificationsEnabled(mApplication)) {
+            !areNotificationsEnabled(mApplication)) {
             // 处理 Toast 关闭通知栏权限之后无法弹出的问题
             // 通过查看和对比 NotificationManagerService 的源码
             // 发现这个问题已经在 Android 10 版本上面修复了
@@ -122,7 +116,7 @@ public class ToastStrategy implements IToastStrategy {
         } else {
             toast = new SystemToast(mApplication);
         }
-        if (isSupportToastStyle(toast) || !onlyShowSystemToastStyle()) {
+        if (areSupportCustomToastStyle(toast) || !onlyShowSystemToastStyle()) {
             diyToastStyle(toast, params.style);
         }
         return toast;
@@ -130,50 +124,58 @@ public class ToastStrategy implements IToastStrategy {
 
     @Override
     public void showToast(ToastParams params) {
-        switch (mShowStrategyType) {
-            case SHOW_STRATEGY_TYPE_IMMEDIATELY: {
-                // 移除之前未显示的 Toast 消息
-                HANDLER.removeCallbacksAndMessages(mShowMessageToken);
-                long uptimeMillis = SystemClock.uptimeMillis() + params.delayMillis + (params.crossPageShow ? 0 : DEFAULT_DELAY_TIMEOUT);
-                HANDLER.postAtTime(new ShowToastRunnable(params), mShowMessageToken, uptimeMillis);
-                break;
-            }
-            case SHOW_STRATEGY_TYPE_QUEUE: {
-                // 计算出这个 Toast 显示时间
-                long showToastMillis = SystemClock.uptimeMillis() + params.delayMillis + (params.crossPageShow ? 0 : DEFAULT_DELAY_TIMEOUT);
-                // 根据吐司的长短计算出等待时间
-                long waitMillis = generateToastWaitMillis(params);
-                // 如果当前显示的时间在上一个 Toast 的显示范围之内
-                // 那么就重新计算 Toast 的显示时间
-                if (showToastMillis < (mLastShowToastMillis + waitMillis)) {
-                    showToastMillis = mLastShowToastMillis + waitMillis;
-                }
-                HANDLER.postAtTime(new ShowToastRunnable(params), mShowMessageToken, showToastMillis);
-                mLastShowToastMillis = showToastMillis;
-                break;
-            }
-            default:
-                break;
-        }
+        HANDLER.postDelayed(new ShowRunnable(params), getMustShowDelayDuration(params));
     }
 
     @Override
     public void cancelToast() {
-        HANDLER.removeCallbacksAndMessages(mCancelMessageToken);
         long uptimeMillis = SystemClock.uptimeMillis();
-        HANDLER.postAtTime(new CancelToastRunnable(), mCancelMessageToken, uptimeMillis);
+        HANDLER.postAtTime(new CancelRunnable(), uptimeMillis);
+    }
+
+    /**
+     * 获取 Handler 对象
+     */
+    protected static Handler getHandler() {
+        return HANDLER;
+    }
+
+    /**
+     * 获取必须的显示延迟时长
+     */
+    protected int getMustShowDelayDuration(ToastParams params) {
+        if (params.priorityType != ToastParams.PRIORITY_TYPE_GLOBAL) {
+            return 100;
+        }
+        return 0;
+    }
+
+    /**
+     * 获取最佳的显示延迟时长
+     */
+    protected int getBestShowDelayDuration(ToastParams params) {
+        if (params.priorityType != ToastParams.PRIORITY_TYPE_GLOBAL && getToastActivity() == null) {
+            // 延迟一段时间之后再执行，因为在没有通知栏权限的情况下，Toast 只能显示在当前 Activity 上面（即使用 ActivityToast）
+            // 如果当前 Activity 在 showToast 之后立马进行 finish 了，那么这个时候 Toast 可能会显示不出来
+            // 因为 Toast 会显示在销毁 Activity 界面上，而不会显示在新跳转的 Activity 上面，所以会导致显示不出来的问题
+            // 另外有悬浮窗权限的情况下，使用全局的 Toast（即使用 GlobalToast），这种立刻显示也会有一些问题
+            // 我在小米 12 Android 12 的手机上面测试，从权限设置页返回的时候，发现 Toast 有几率会从左上的位置显示，然后会变回正常的位置
+            // 如果是系统的 Toast（即使用 SystemToast、SafeToast、NotificationToast 任意一个）则不会有这个问题
+            // 300 只是一个经验值，经过很多次验证得出来的值，当然你觉得这个值不是自己想要的，也可以重写此方法改成自己想要的
+            return 300;
+        }
+        return 0;
     }
 
     /**
      * 是否支持设置自定义 Toast 样式
      */
-    protected boolean isSupportToastStyle(IToast toast) {
-        // targetSdkVersion >= 30 的情况下在后台显示自定义样式的 Toast 会被系统屏蔽，并且日志会输出以下警告：
+    protected boolean areSupportCustomToastStyle(IToast toast) {
+        // sdk 版本 >= 30 的情况下在后台显示自定义样式的 Toast 会被系统屏蔽，并且日志会输出以下警告：
         // Blocking custom toast from package com.xxx.xxx due to package not in the foreground
-        // targetSdkVersion < 30 的情况下 new Toast，并且不设置视图显示，系统会抛出以下异常：
+        // sdk 版本 < 30 的情况下 new Toast，并且不设置视图显示，系统会抛出以下异常：
         // java.lang.RuntimeException: This Toast was not created with Toast.makeText()
-        return toast instanceof CustomToast || Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
-                mApplication.getApplicationInfo().targetSdkVersion < Build.VERSION_CODES.R;
+        return toast instanceof CustomToast || Build.VERSION.SDK_INT < Build.VERSION_CODES.R;
     }
 
     /**
@@ -199,6 +201,47 @@ public class ToastStrategy implements IToastStrategy {
 
     /**
      * 显示任务
+     */
+    private class ShowRunnable implements Runnable {
+
+        private final ToastParams mToastParams;
+
+        private ShowRunnable(ToastParams params) {
+            mToastParams = params;
+        }
+
+        @Override
+        public void run() {
+            switch (mShowStrategyType) {
+                case SHOW_STRATEGY_TYPE_IMMEDIATELY: {
+                    // 移除之前未显示的 Toast 消息
+                    long uptimeMillis = SystemClock.uptimeMillis() + mToastParams.delayMillis + getBestShowDelayDuration(mToastParams);
+                    HANDLER.postAtTime(new ShowToastRunnable(mToastParams), uptimeMillis);
+                    break;
+                }
+                case SHOW_STRATEGY_TYPE_QUEUE: {
+                    // 计算出这个 Toast 显示时间
+                    long showToastMillis =
+                        SystemClock.uptimeMillis() + mToastParams.delayMillis + getBestShowDelayDuration(mToastParams);
+                    // 根据吐司的长短计算出等待时间
+                    long waitMillis = generateToastWaitMillis(mToastParams);
+                    // 如果当前显示的时间在上一个 Toast 的显示范围之内
+                    // 那么就重新计算 Toast 的显示时间
+                    if (showToastMillis < (mLastShowToastMillis + waitMillis)) {
+                        showToastMillis = mLastShowToastMillis + waitMillis;
+                    }
+                    HANDLER.postAtTime(new ShowToastRunnable(mToastParams), showToastMillis);
+                    mLastShowToastMillis = showToastMillis;
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+    }
+
+    /**
+     * 显示 Toast 任务
      */
     private class ShowToastRunnable implements Runnable {
 
@@ -232,7 +275,7 @@ public class ToastStrategy implements IToastStrategy {
     /**
      * 取消任务
      */
-    private class CancelToastRunnable implements Runnable {
+    private class CancelRunnable implements Runnable {
 
         @Override
         public void run() {
@@ -261,26 +304,20 @@ public class ToastStrategy implements IToastStrategy {
     protected boolean isChangeEnabledCompat(long changeId) {
         // 需要注意的是这个 api 是在 android 11 的时候出现的，反射前需要先判断好版本
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            return true;
+            return false;
         }
         try {
             // 因为 Compatibility.isChangeEnabled() 普通应用根本调用不到，反射也不行
             // 通过 Toast.isSystemRenderedTextToast 也没有办法反射到
             // 最后发现反射 CompatChanges.isChangeEnabled 是可以的
-            Class<?> aClass = Class.forName("android.app.compat.CompatChanges");
-            Method method = aClass.getMethod("isChangeEnabled", long.class);
+            Class<?> clazz = Class.forName("android.app.compat.CompatChanges");
+            Method method = clazz.getMethod("isChangeEnabled", long.class);
             method.setAccessible(true);
             return Boolean.parseBoolean(String.valueOf(method.invoke(null, changeId)));
-        } catch (ClassNotFoundException e) {
+        } catch (ClassNotFoundException | InvocationTargetException | NoSuchMethodException | IllegalAccessException e) {
             e.printStackTrace();
-        } catch (InvocationTargetException e) {
-            e.printStackTrace();
-        } catch (NoSuchMethodException e) {
-            e.printStackTrace();
-        } catch (IllegalAccessException e) {
-            e.printStackTrace();
+            return false;
         }
-        return false;
     }
 
     /**
@@ -310,5 +347,44 @@ public class ToastStrategy implements IToastStrategy {
             }
         }
         return true;
+    }
+
+    /**
+     * 获取显示自定义 Toast 的 Activity 对象
+     */
+    protected Activity getToastActivity() {
+        Activity visibleActivity = ActivityStack.getInstance().getVisibleActivity();
+        Activity focusActivity = ActivityStack.getInstance().getFocusActivity();
+        if (focusActivity == null || visibleActivity == null) {
+            return null;
+        }
+
+        if (focusActivity != visibleActivity) {
+            return null;
+        }
+
+        if (visibleActivity.isFinishing()) {
+            return null;
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && visibleActivity.isDestroyed()) {
+            return null;
+        }
+
+        long resumedActivityTime = ActivityStack.getInstance().getActivityResumedTime();
+        // 如果这个 Activity 可见时长没有超过 200 毫秒，则证明 Activity 是刚跳转的，
+        // 在这种情况下，如果直接拿来显示 WindowManager 是会有问题的，在 Android 16 上面会出现残影的情况
+        // Github issue 地址：https://github.com/getActivity/Toaster/issues/150
+        // 目前能想到比较好的解决方案是：必须 Activity 可见时长超过 200 毫秒才可以，
+        // 否则就不能用 Activity 来显示 Toast，只能用系统的 Toast 来显示了，
+        // 如果你想要在 startActivity 的时候，又能显示自定义 Toast 的效果，
+        // 建议在显示 show 的时候加一下延迟显示，建议设置在 500 毫秒及以上，
+        // 以确保 Toast 在显示的时候不受 Android 16 残影问题的影响。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA &&
+            System.currentTimeMillis() - resumedActivityTime < 200) {
+            return null;
+        }
+
+        return visibleActivity;
     }
 }
